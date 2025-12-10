@@ -1,0 +1,43 @@
+cls
+
+$urls = @{
+ TopGainers = "https://finviz.com/screener.ashx?v=411&s=ta_topgainers&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ TopLosers = "https://finviz.com/screener.ashx?v=411&s=ta_toplosers&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ NewHigh = "https://finviz.com/screener.ashx?v=411&s=ta_newhigh&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ NewLow = "https://finviz.com/screener.ashx?v=411&s=ta_newlow&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ MostVolatile = "https://finviz.com/screener.ashx?v=411&s=ta_mostvolatile&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ MostActive = "https://finviz.com/screener.ashx?v=411&s=ta_mostactive&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ Unusualvolume = "https://finviz.com/screener.ashx?v=411&s=ta_unusualvolume&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ Overbought = "https://finviz.com/screener.ashx?v=411&s=ta_overbought&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ Oversold =  "https://finviz.com/screener.ashx?v=411&s=ta_oversold&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ Downgraders = "https://finviz.com/screener.ashx?v=411&s=n_downgrades&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ Upgrades = "https://finviz.com/screener.ashx?v=411&s=n_upgrades&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ RecentInsiderBuying = "https://finviz.com/screener.ashx?v=411&s=it_latestbuys&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ RecentInsiderSelling = "https://finviz.com/screener.ashx?v=411&s=it_latestsales&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ MajorNews = "https://finviz.com/screener.ashx?v=411&s=n_majornews&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o2000%2Csh_curvol_o2000%2Csh_price_o1%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ SwingSetup = "https://finviz.com/screener.ashx?v=411&f=fa_epsqoq_o15%2Cfa_salesqoq_o15%2Cgeo_usa%2Csh_avgvol_o2000%2Csh_price_o1%2Cta_sma20_pa%2Cta_sma200_pa%2Cta_sma50_pa&ft=4&o=-volume"
+ AllStocks = "https://finviz.com/screener.ashx?v=411&f=geo_usa%2Cind_stocksonly%2Csh_avgvol_o1000%2Csh_curvol_o1000%2Csh_price_o1%2Csh_relvol_o0.5%2Cta_averagetruerange_o0.5&ft=4&o=-volume"
+ # AllStocks = "https://finviz.com/screener.ashx?v=411"
+}
+
+# Loop through each item in the hashtable
+
+foreach ($entry in $urls.GetEnumerator()) {
+    $name = $entry.Key
+    $url = $entry.Value
+
+    try {
+        $html = Invoke-WebRequest -Uri $url -UseBasicParsing
+        $tickerMatches = [regex]::Matches($html.Content, "quote\.ashx\?t=([A-Z]+)&")
+        $tickers = $tickerMatches | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+
+        $tickers -join ',' | Out-File -FilePath "C:\AznariyRamazanov\Trading\toswatchlists\$name.txt" -Encoding utf8
+
+        Write-Host "Saved $($tickers.Count) tickers to $name.txt"
+    }
+    catch {
+        Write-Warning "Failed to get data from $url — $($_.Exception.Message)"
+    }
+
+    Start-Sleep -Seconds 3
+}
