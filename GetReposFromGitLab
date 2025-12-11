@@ -7,8 +7,11 @@
         * Tries to get the last merged MR into that branch
         * If no merged MR, falls back to the latest commit on that branch
         * Derives a project status: active / archived / pending_deletion
+        * Captures who did the "last change":
+            - From MR: merged_by.name (or author.name)
+            - From commit: author_name
     - Exports a CSV with:
-        RepositoryName, DefaultBranch, LastChangeDate, ProjectStatus
+        RepositoryName, DefaultBranch, LastChangeDate, ProjectStatus, LastChangeAuthor
       sorted by LastChangeDate (newest → oldest)
 
     Requirements:
@@ -114,7 +117,8 @@ foreach ($proj in $projects) {
 
     Write-Host "Processing project: $projectName (default branch: $defaultBranch, status: $projectStatus)"
 
-    $lastChangeDate = $null
+    $lastChangeDate   = $null
+    $lastChangeAuthor = $null
 
     # 1) Try last merged MR into the default branch
     try {
@@ -128,6 +132,14 @@ foreach ($proj in $projects) {
             $lastChangeDate = $lastMr.merged_at
             if (-not $lastChangeDate) {
                 $lastChangeDate = $lastMr.updated_at
+            }
+
+            # Who did the "last change" via MR:
+            # Prefer the person who merged it, then fall back to MR author
+            if ($lastMr.merged_by -and $lastMr.merged_by.name) {
+                $lastChangeAuthor = $lastMr.merged_by.name
+            } elseif ($lastMr.author -and $lastMr.author.name) {
+                $lastChangeAuthor = $lastMr.author.name
             }
         }
     } catch {
@@ -145,6 +157,13 @@ foreach ($proj in $projects) {
                 $lastCommit = $commits[0]
                 # committed_date is usually what you want
                 $lastChangeDate = $lastCommit.committed_date
+
+                # Last change author comes from commit author
+                if ($lastCommit.author_name) {
+                    $lastChangeAuthor = $lastCommit.author_name
+                } elseif ($lastCommit.committer_name) {
+                    $lastChangeAuthor = $lastCommit.committer_name
+                }
             } else {
                 Write-Warning "No commits found on branch '$defaultBranch' for project '$projectName'."
             }
@@ -165,10 +184,11 @@ foreach ($proj in $projects) {
     }
 
     $result += [pscustomobject]@{
-        RepositoryName = $projectName
-        DefaultBranch  = $defaultBranch
-        LastChangeDate = $lastChangeDateOnly
-        ProjectStatus  = $projectStatus
+        RepositoryName   = $projectName
+        DefaultBranch    = $defaultBranch
+        LastChangeDate   = $lastChangeDateOnly
+        ProjectStatus    = $projectStatus
+        LastChangeAuthor = $lastChangeAuthor
     }
 }
 
