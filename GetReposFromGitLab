@@ -1,53 +1,65 @@
-<# 
-    Requirements:
-    - PowerShell 5+ or PowerShell Core
-    - GitLab Personal Access Token (PAT) with at least read_api scope 
-      (for private groups/projects). For public ones, you can leave the token empty,
-      but it's safer to use one.
+<#
+    This script:
+    - Takes a GitLab group path (e.g. "microsoft/portal" from https://gitlab.com/microsoft/portal)
+    - Lists all projects under that group (and subgroups)
+    - For each project:
+        * Finds the default branch
+        * Tries to get the last merged MR into that branch
+        * If no merged MR, falls back to the latest commit on that branch
+    - Exports a CSV with:
+        RepositoryName, DefaultBranch, LastChangeDate
 
-    What to edit:
-    - $GroupPath   -> path part of the GitLab URL, e.g. "microsoft/portal"
-    - $GitLabToken -> your PAT (or pull it from an env var)
-    - $OutputCsv   -> where to save the CSV
+    Requirements:
+    - PowerShell 5+ or PowerShell 7+
+    - GitLab Personal Access Token with at least "read_api" scope
 #>
 
+# ==== CONFIG ====
 $GitLabBaseUrl = "https://gitlab.com/api/v4"
-$GroupPath     = "microsoft/portal"       # <-- change this to your group/subgroup path
-$GitLabToken   = ""                       # <-- put your PAT here, or read from $env:GITLAB_TOKEN
-$OutputCsv     = "gitlab_repos_last_merge.csv"
+$GroupPath     = "microsoft/portal"         # <-- change to your group/subgroup path
+$GitLabToken   = "<PUT_YOUR_TOKEN_HERE>"    # <-- must have read_api
+$OutputCsv     = "gitlab_repos_last_change.csv"
+# ================
 
-# Build headers (omit token if blank and everything is public)
+# Build headers
 $Headers = @{}
-if (![string]::IsNullOrWhiteSpace($GitLabToken)) {
+if (-not [string]::IsNullOrWhiteSpace($GitLabToken)) {
     $Headers["PRIVATE-TOKEN"] = $GitLabToken
 }
 
-# Helper: URL-encode group path
+# URL-encode the group path (handles slashes, spaces, etc.)
 $encodedGroupPath = [System.Uri]::EscapeDataString($GroupPath)
 
 Write-Host "Getting group info for '$GroupPath'..."
 
-# Get group info to obtain its numeric ID
-$groupUrl = "$GitLabBaseUrl/groups/$encodedGroupPath"
+# Get group info to obtain numeric ID
 try {
-    $group = Invoke-RestMethod -Uri $groupUrl -Headers $Headers -Method Get
+    $groupUrl = "$GitLabBaseUrl/groups/$encodedGroupPath"
+    $group = Invoke-RestMethod -Uri $groupUrl -Headers $Headers -Method Get -ErrorAction Stop
 } catch {
-    Write-Error "Failed to fetch group information. Check GroupPath, token, and permissions. Error: $($_.Exception.Message)"
+    $resp = $_.Exception.Response
+    if ($resp -and $resp.GetResponseStream()) {
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $body = $reader.ReadToEnd()
+        Write-Error "Failed to fetch group information. Status: $($resp.StatusCode) $($resp.StatusDescription). Body: $body"
+    } else {
+        Write-Error "Failed to fetch group information. Error: $($_.Exception.Message)"
+    }
     return
 }
 
 $groupId = $group.id
 Write-Host "Group ID: $groupId"
 
-# Get all projects under the group (handle pagination)
-Write-Host "Fetching projects under the group (this may require multiple API calls)..."
+# Fetch all projects under the group (including subgroups), with pagination
+Write-Host "Fetching projects under the group (including subgroups)..."
 
 $projects = @()
-$page = 1
-$perPage = 100
+$page     = 1
+$perPage  = 100
 
 while ($true) {
-    $projectsUrl = "$GitLabBaseUrl/groups/$groupId/projects?per_page=$perPage&page=$page&include_subgroups=true"
+    $projectsUrl  = "$GitLabBaseUrl/groups/$groupId/projects?per_page=$perPage&page=$page&include_subgroups=true"
     $projectsPage = Invoke-RestMethod -Uri $projectsUrl -Headers $Headers -Method Get
 
     if (-not $projectsPage -or $projectsPage.Count -eq 0) {
@@ -63,12 +75,12 @@ Write-Host "Total projects found: $($projects.Count)"
 $result = @()
 
 foreach ($proj in $projects) {
-    $projectId   = $proj.id
-    $projectName = $proj.path_with_namespace
+    $projectId     = $proj.id
+    $projectName   = $proj.path_with_namespace
     $defaultBranch = $proj.default_branch
 
     if (-not $defaultBranch) {
-        Write-Warning "Project '$projectName' has no default branch (skipping MR lookup)."
+        Write-Warning "Project '$projectName' has no default branch (skipping MR/commit lookup)."
         $result += [pscustomobject]@{
             RepositoryName = $projectName
             DefaultBranch  = ""
@@ -79,27 +91,17 @@ foreach ($proj in $projects) {
 
     Write-Host "Processing project: $projectName (default branch: $defaultBranch)"
 
-    # Optionally, you can verify if the default branch is protected:
-    # GET /projects/:id/protected_branches/:name
-    $isProtected = $false
-    try {
-        $protectedUrl = "$GitLabBaseUrl/projects/$projectId/protected_branches/$([System.Uri]::EscapeDataString($defaultBranch))"
-        $protectedBranch = Invoke-RestMethod -Uri $protectedUrl -Headers $Headers -Method Get -ErrorAction Stop
-        if ($protectedBranch) { $isProtected = $true }
-    } catch {
-        # If 404 or error, assume not protected. We won't fail the script for this.
-        $isProtected = $false
-    }
-
-    # Get last merged MR into the default branch
-    # /projects/:id/merge_requests?state=merged&target_branch=...&order_by=updated_at&sort=desc&per_page=1
     $lastChangeDate = $null
+
+    # 1) Try last merged MR into the default branch
     try {
+        # GET /projects/:id/merge_requests
         $mrUrl = "$GitLabBaseUrl/projects/$projectId/merge_requests?state=merged&target_branch=$([System.Uri]::EscapeDataString($defaultBranch))&order_by=updated_at&sort=desc&per_page=1"
         $mrs = Invoke-RestMethod -Uri $mrUrl -Headers $Headers -Method Get
+
         if ($mrs -and $mrs.Count -gt 0) {
-            # Prefer merged_at; if null, fall back to updated_at
             $lastMr = $mrs[0]
+            # Prefer merged_at; if null, fall back to updated_at
             $lastChangeDate = $lastMr.merged_at
             if (-not $lastChangeDate) {
                 $lastChangeDate = $lastMr.updated_at
@@ -109,9 +111,25 @@ foreach ($proj in $projects) {
         Write-Warning "Failed to get merge requests for project '$projectName': $($_.Exception.Message)"
     }
 
-    # Optional: make it clear if branch isn't protected in the CSV
-    # For your requested format, we’ll only write the branch name,
-    # but you could append "(unprotected)" if you want.
+    # 2) If no merged MR, fall back to latest commit on default branch
+    if (-not $lastChangeDate) {
+        try {
+            # GET /projects/:id/repository/commits?ref_name=<branch>&per_page=1
+            $commitsUrl = "$GitLabBaseUrl/projects/$projectId/repository/commits?ref_name=$([System.Uri]::EscapeDataString($defaultBranch))&per_page=1"
+            $commits = Invoke-RestMethod -Uri $commitsUrl -Headers $Headers -Method Get
+
+            if ($commits -and $commits.Count -gt 0) {
+                $lastCommit = $commits[0]
+                # committed_date is usually what you want
+                $lastChangeDate = $lastCommit.committed_date
+            } else {
+                Write-Warning "No commits found on branch '$defaultBranch' for project '$projectName'."
+            }
+        } catch {
+            Write-Warning "Failed to get commits for project '$projectName': $($_.Exception.Message)"
+        }
+    }
+
     $result += [pscustomobject]@{
         RepositoryName = $projectName
         DefaultBranch  = $defaultBranch
@@ -120,7 +138,5 @@ foreach ($proj in $projects) {
 }
 
 Write-Host "Exporting results to CSV: $OutputCsv"
-
 $result | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
-
 Write-Host "Done. CSV created at '$OutputCsv'."
