@@ -2,13 +2,14 @@
     This script:
     - Takes a GitLab group path (e.g. "microsoft/portal" from https://gitlab.com/microsoft/portal)
     - Lists all projects under that group (and subgroups)
-    - For each project:
+    - For each project that actually has a repository:
         * Finds the default branch
         * Tries to get the last merged MR into that branch
         * If no merged MR, falls back to the latest commit on that branch
         * Derives a project status: active / archived / pending_deletion
     - Exports a CSV with:
         RepositoryName, DefaultBranch, LastChangeDate, ProjectStatus
+      sorted by LastChangeDate (newest → oldest)
 
     Requirements:
     - PowerShell 5+ or PowerShell 7+
@@ -71,7 +72,7 @@ while ($true) {
     $page++
 }
 
-Write-Host "Total projects found: $($projects.Count)"
+Write-Host "Total projects found (including empty shells): $($projects.Count)"
 
 $result = @()
 
@@ -82,15 +83,15 @@ foreach ($proj in $projects) {
 
     # Derive project status from GitLab fields
     # archived (bool), marked_for_deletion_on (date or null)
-    $isArchived           = $false
-    $markedForDeletionOn  = $null
-    $projectStatus        = "active"
+    $isArchived          = $false
+    $markedForDeletionOn = $null
+    $projectStatus       = "active"
 
     if ($null -ne $proj.archived) {
         $isArchived = [bool]$proj.archived
     }
 
-    # Some instances might not have this field if older version, so guard for null
+    # This property may not exist on some instances, so guard for that
     if ($proj.PSObject.Properties.Name -contains "marked_for_deletion_on") {
         $markedForDeletionOn = $proj.marked_for_deletion_on
     }
@@ -100,20 +101,14 @@ foreach ($proj in $projects) {
     } elseif ($isArchived) {
         $projectStatus = "archived"
     } elseif ($markedForDeletionOn) {
-        # Defensive, in case instance sets marked_for_deletion_on without archived=true
         $projectStatus = "pending_deletion"
     } else {
         $projectStatus = "active"
     }
 
+    # Skip projects that have no repository (no default branch)
     if (-not $defaultBranch) {
-        Write-Warning "Project '$projectName' has no default branch (skipping MR/commit lookup)."
-        $result += [pscustomobject]@{
-            RepositoryName = $projectName
-            DefaultBranch  = ""
-            LastChangeDate = ""
-            ProjectStatus  = $projectStatus
-        }
+        Write-Warning "Project '$projectName' has no repository (no default branch) - skipping."
         continue
     }
 
@@ -177,6 +172,16 @@ foreach ($proj in $projects) {
     }
 }
 
+# Sort by LastChangeDate (newest first).
+# Repos with no LastChangeDate (null/empty) go to the bottom.
+$sortedResult = $result | Sort-Object {
+    if ($_.LastChangeDate) {
+        [datetime]$_.LastChangeDate
+    } else {
+        [datetime]::MinValue
+    }
+} -Descending
+
 Write-Host "Exporting results to CSV: $OutputCsv"
-$result | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
+$sortedResult | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
 Write-Host "Done. CSV created at '$OutputCsv'."
