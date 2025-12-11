@@ -1,0 +1,126 @@
+<# 
+    Requirements:
+    - PowerShell 5+ or PowerShell Core
+    - GitLab Personal Access Token (PAT) with at least read_api scope 
+      (for private groups/projects). For public ones, you can leave the token empty,
+      but it's safer to use one.
+
+    What to edit:
+    - $GroupPath   -> path part of the GitLab URL, e.g. "microsoft/portal"
+    - $GitLabToken -> your PAT (or pull it from an env var)
+    - $OutputCsv   -> where to save the CSV
+#>
+
+$GitLabBaseUrl = "https://gitlab.com/api/v4"
+$GroupPath     = "microsoft/portal"       # <-- change this to your group/subgroup path
+$GitLabToken   = ""                       # <-- put your PAT here, or read from $env:GITLAB_TOKEN
+$OutputCsv     = "gitlab_repos_last_merge.csv"
+
+# Build headers (omit token if blank and everything is public)
+$Headers = @{}
+if (![string]::IsNullOrWhiteSpace($GitLabToken)) {
+    $Headers["PRIVATE-TOKEN"] = $GitLabToken
+}
+
+# Helper: URL-encode group path
+$encodedGroupPath = [System.Uri]::EscapeDataString($GroupPath)
+
+Write-Host "Getting group info for '$GroupPath'..."
+
+# Get group info to obtain its numeric ID
+$groupUrl = "$GitLabBaseUrl/groups/$encodedGroupPath"
+try {
+    $group = Invoke-RestMethod -Uri $groupUrl -Headers $Headers -Method Get
+} catch {
+    Write-Error "Failed to fetch group information. Check GroupPath, token, and permissions. Error: $($_.Exception.Message)"
+    return
+}
+
+$groupId = $group.id
+Write-Host "Group ID: $groupId"
+
+# Get all projects under the group (handle pagination)
+Write-Host "Fetching projects under the group (this may require multiple API calls)..."
+
+$projects = @()
+$page = 1
+$perPage = 100
+
+while ($true) {
+    $projectsUrl = "$GitLabBaseUrl/groups/$groupId/projects?per_page=$perPage&page=$page&include_subgroups=true"
+    $projectsPage = Invoke-RestMethod -Uri $projectsUrl -Headers $Headers -Method Get
+
+    if (-not $projectsPage -or $projectsPage.Count -eq 0) {
+        break
+    }
+
+    $projects += $projectsPage
+    $page++
+}
+
+Write-Host "Total projects found: $($projects.Count)"
+
+$result = @()
+
+foreach ($proj in $projects) {
+    $projectId   = $proj.id
+    $projectName = $proj.path_with_namespace
+    $defaultBranch = $proj.default_branch
+
+    if (-not $defaultBranch) {
+        Write-Warning "Project '$projectName' has no default branch (skipping MR lookup)."
+        $result += [pscustomobject]@{
+            RepositoryName = $projectName
+            DefaultBranch  = ""
+            LastChangeDate = ""
+        }
+        continue
+    }
+
+    Write-Host "Processing project: $projectName (default branch: $defaultBranch)"
+
+    # Optionally, you can verify if the default branch is protected:
+    # GET /projects/:id/protected_branches/:name
+    $isProtected = $false
+    try {
+        $protectedUrl = "$GitLabBaseUrl/projects/$projectId/protected_branches/$([System.Uri]::EscapeDataString($defaultBranch))"
+        $protectedBranch = Invoke-RestMethod -Uri $protectedUrl -Headers $Headers -Method Get -ErrorAction Stop
+        if ($protectedBranch) { $isProtected = $true }
+    } catch {
+        # If 404 or error, assume not protected. We won't fail the script for this.
+        $isProtected = $false
+    }
+
+    # Get last merged MR into the default branch
+    # /projects/:id/merge_requests?state=merged&target_branch=...&order_by=updated_at&sort=desc&per_page=1
+    $lastChangeDate = $null
+    try {
+        $mrUrl = "$GitLabBaseUrl/projects/$projectId/merge_requests?state=merged&target_branch=$([System.Uri]::EscapeDataString($defaultBranch))&order_by=updated_at&sort=desc&per_page=1"
+        $mrs = Invoke-RestMethod -Uri $mrUrl -Headers $Headers -Method Get
+        if ($mrs -and $mrs.Count -gt 0) {
+            # Prefer merged_at; if null, fall back to updated_at
+            $lastMr = $mrs[0]
+            $lastChangeDate = $lastMr.merged_at
+            if (-not $lastChangeDate) {
+                $lastChangeDate = $lastMr.updated_at
+            }
+        }
+    } catch {
+        Write-Warning "Failed to get merge requests for project '$projectName': $($_.Exception.Message)"
+    }
+
+    # Optional: make it clear if branch isn't protected in the CSV
+    # For your requested format, we’ll only write the branch name,
+    # but you could append "(unprotected)" if you want.
+    $result += [pscustomobject]@{
+        RepositoryName = $projectName
+        DefaultBranch  = $defaultBranch
+        LastChangeDate = $lastChangeDate
+    }
+}
+
+Write-Host "Exporting results to CSV: $OutputCsv"
+
+$result | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
+
+Write-Host "Done. CSV created at '$OutputCsv'."
