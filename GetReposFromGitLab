@@ -6,8 +6,9 @@
         * Finds the default branch
         * Tries to get the last merged MR into that branch
         * If no merged MR, falls back to the latest commit on that branch
+        * Derives a project status: active / archived / pending_deletion
     - Exports a CSV with:
-        RepositoryName, DefaultBranch, LastChangeDate
+        RepositoryName, DefaultBranch, LastChangeDate, ProjectStatus
 
     Requirements:
     - PowerShell 5+ or PowerShell 7+
@@ -79,17 +80,44 @@ foreach ($proj in $projects) {
     $projectName   = $proj.path_with_namespace
     $defaultBranch = $proj.default_branch
 
+    # Derive project status from GitLab fields
+    # archived (bool), marked_for_deletion_on (date or null)
+    $isArchived           = $false
+    $markedForDeletionOn  = $null
+    $projectStatus        = "active"
+
+    if ($null -ne $proj.archived) {
+        $isArchived = [bool]$proj.archived
+    }
+
+    # Some instances might not have this field if older version, so guard for null
+    if ($proj.PSObject.Properties.Name -contains "marked_for_deletion_on") {
+        $markedForDeletionOn = $proj.marked_for_deletion_on
+    }
+
+    if ($isArchived -and $markedForDeletionOn) {
+        $projectStatus = "pending_deletion"
+    } elseif ($isArchived) {
+        $projectStatus = "archived"
+    } elseif ($markedForDeletionOn) {
+        # Defensive, in case instance sets marked_for_deletion_on without archived=true
+        $projectStatus = "pending_deletion"
+    } else {
+        $projectStatus = "active"
+    }
+
     if (-not $defaultBranch) {
         Write-Warning "Project '$projectName' has no default branch (skipping MR/commit lookup)."
         $result += [pscustomobject]@{
             RepositoryName = $projectName
             DefaultBranch  = ""
             LastChangeDate = ""
+            ProjectStatus  = $projectStatus
         }
         continue
     }
 
-    Write-Host "Processing project: $projectName (default branch: $defaultBranch)"
+    Write-Host "Processing project: $projectName (default branch: $defaultBranch, status: $projectStatus)"
 
     $lastChangeDate = $null
 
@@ -130,10 +158,22 @@ foreach ($proj in $projects) {
         }
     }
 
+    # Convert lastChangeDate to date-only string (yyyy-MM-dd)
+    $lastChangeDateOnly = $null
+    if ($lastChangeDate) {
+        try {
+            $lastChangeDateOnly = ([datetime]$lastChangeDate).ToString("yyyy-MM-dd")
+        } catch {
+            # Fallback to raw value if parse fails
+            $lastChangeDateOnly = $lastChangeDate
+        }
+    }
+
     $result += [pscustomobject]@{
         RepositoryName = $projectName
         DefaultBranch  = $defaultBranch
-        LastChangeDate = $lastChangeDate
+        LastChangeDate = $lastChangeDateOnly
+        ProjectStatus  = $projectStatus
     }
 }
 
