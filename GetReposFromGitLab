@@ -2,62 +2,92 @@
     This script:
     - Takes a GitLab group path (e.g. "microsoft/portal" from https://gitlab.com/microsoft/portal)
     - Lists all projects under that group (and subgroups)
-    - For each project that actually has a repository:
+    - For each GitLab project that actually has a repository:
         * Finds the default branch
         * Tries to get the last merged MR into that branch
         * If no merged MR, falls back to the latest commit on that branch
         * Derives a project status: active / archived / pending_deletion
-        * Captures who did the "last change":
-            - From MR: merged_by.name (or author.name)
-            - From commit: author_name
-    - Exports a CSV with:
-        RepositoryName, DefaultBranch, LastChangeDate, ProjectStatus, LastChangeAuthor
-      sorted by LastChangeDate (newest → oldest)
+        * Captures who did the "last change"
+    - Connects to Checkmarx One and loads all projects via GET /api/projects
+    - For each GitLab repo, checks if its repo name matches any Checkmarx project name
+      and sets ScanningInCheckmarx = True / False
+
+    CSV columns:
+        RepositoryName
+        DefaultBranch
+        LastChangeDate      (yyyy-MM-dd, newest → oldest)
+        ProjectStatus
+        LastChangeAuthor
+        ScanningInCheckmarx (True/False)
 
     Requirements:
     - PowerShell 5+ or PowerShell 7+
     - GitLab Personal Access Token with at least "read_api" scope
+    - Checkmarx One Access Token (JWT) with permission to read projects
 #>
 
-# ==== CONFIG ====
+# ==== GITLAB CONFIG ====
 $GitLabBaseUrl = "https://gitlab.com/api/v4"
 $GroupPath     = "microsoft/portal"         # <-- change to your group/subgroup path
-$GitLabToken   = "<PUT_YOUR_TOKEN_HERE>"    # <-- must have read_api
-$OutputCsv     = "gitlab_repos_last_change.csv"
-# ================
+$GitLabToken   = "<PUT_YOUR_GITLAB_TOKEN_HERE>"    # <-- must have read_api
+# ========================
 
-# Build headers
-$Headers = @{}
+# ==== CHECKMARX ONE CONFIG ====
+# Example US multi-tenant base URL (change to your tenant if different, e.g. single tenant URL)
+$CxBaseUrl        = "https://ast.checkmarx.net"      # <-- adjust to your CxOne base URL if needed
+$CxAccessToken    = "<PUT_YOUR_CXONE_ACCESS_TOKEN_HERE>"  # <-- Bearer access token (JWT)
+$CxPageSize       = 100        # page size for /api/projects
+# ===============================
+
+# ==== OUTPUT CONFIG ====
+$OutputCsv = "gitlab_repos_last_change.csv"
+# =======================
+
+
+# ---------- GitLab headers ----------
+$GitLabHeaders = @{}
 if (-not [string]::IsNullOrWhiteSpace($GitLabToken)) {
-    $Headers["PRIVATE-TOKEN"] = $GitLabToken
+    $GitLabHeaders["PRIVATE-TOKEN"] = $GitLabToken
 }
+
+# ---------- Checkmarx headers ----------
+$CxHeaders = @{}
+if (-not [string]::IsNullOrWhiteSpace($CxAccessToken)) {
+    $CxHeaders["Authorization"] = "Bearer $CxAccessToken"
+}
+
+# ==========================================
+# 1. GET GITLAB GROUP INFO
+# ==========================================
 
 # URL-encode the group path (handles slashes, spaces, etc.)
 $encodedGroupPath = [System.Uri]::EscapeDataString($GroupPath)
 
-Write-Host "Getting group info for '$GroupPath'..."
+Write-Host "Getting GitLab group info for '$GroupPath'..."
 
-# Get group info to obtain numeric ID
 try {
     $groupUrl = "$GitLabBaseUrl/groups/$encodedGroupPath"
-    $group = Invoke-RestMethod -Uri $groupUrl -Headers $Headers -Method Get -ErrorAction Stop
+    $group = Invoke-RestMethod -Uri $groupUrl -Headers $GitLabHeaders -Method Get -ErrorAction Stop
 } catch {
     $resp = $_.Exception.Response
     if ($resp -and $resp.GetResponseStream()) {
         $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
         $body = $reader.ReadToEnd()
-        Write-Error "Failed to fetch group information. Status: $($resp.StatusCode) $($resp.StatusDescription). Body: $body"
+        Write-Error "Failed to fetch GitLab group information. Status: $($resp.StatusCode) $($resp.StatusDescription). Body: $body"
     } else {
-        Write-Error "Failed to fetch group information. Error: $($_.Exception.Message)"
+        Write-Error "Failed to fetch GitLab group information. Error: $($_.Exception.Message)"
     }
     return
 }
 
 $groupId = $group.id
-Write-Host "Group ID: $groupId"
+Write-Host "GitLab Group ID: $groupId"
 
-# Fetch all projects under the group (including subgroups), with pagination
-Write-Host "Fetching projects under the group (including subgroups)..."
+# ==========================================
+# 2. FETCH ALL GITLAB PROJECTS IN GROUP
+# ==========================================
+
+Write-Host "Fetching GitLab projects under the group (including subgroups)..."
 
 $projects = @()
 $page     = 1
@@ -65,7 +95,7 @@ $perPage  = 100
 
 while ($true) {
     $projectsUrl  = "$GitLabBaseUrl/groups/$groupId/projects?per_page=$perPage&page=$page&include_subgroups=true"
-    $projectsPage = Invoke-RestMethod -Uri $projectsUrl -Headers $Headers -Method Get
+    $projectsPage = Invoke-RestMethod -Uri $projectsUrl -Headers $GitLabHeaders -Method Get
 
     if (-not $projectsPage -or $projectsPage.Count -eq 0) {
         break
@@ -75,17 +105,80 @@ while ($true) {
     $page++
 }
 
-Write-Host "Total projects found (including empty shells): $($projects.Count)"
+Write-Host "Total GitLab projects found (including empty shells): $($projects.Count)"
+
+
+# ==========================================
+# 3. LOAD CHECKMARX ONE PROJECTS (ONCE)
+# ==========================================
+
+$cxProjectNameSet = $null
+
+if ($CxHeaders.Count -eq 0) {
+    Write-Warning "No Checkmarx One access token configured. 'ScanningInCheckmarx' will be False for all rows."
+} else {
+    Write-Host "Loading Checkmarx One projects via /api/projects..."
+
+    $cxProjectNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    $offset = 0
+
+    while ($true) {
+        # NOTE: If your tenant uses a different pagination scheme (e.g. pageNumber/pageSize),
+        # adjust the query parameters below accordingly.
+        $cxUrl = "$CxBaseUrl/api/projects?limit=$CxPageSize&offset=$offset"
+
+        try {
+            $cxPage = Invoke-RestMethod -Uri $cxUrl -Headers $CxHeaders -Method Get -ErrorAction Stop
+        } catch {
+            Write-Warning "Failed to fetch Checkmarx One projects at offset $offset: $($_.Exception.Message)"
+            break
+        }
+
+        if (-not $cxPage -or $cxPage.Count -eq 0) {
+            break
+        }
+
+        foreach ($cxProj in $cxPage) {
+            # Safely grab the project name
+            if ($cxProj.PSObject.Properties.Name -contains "name") {
+                $name = $cxProj.name
+                if ($name) {
+                    [void]$cxProjectNameSet.Add($name)
+                }
+            }
+        }
+
+        # Stop if fewer than page size returned (no more pages)
+        if ($cxPage.Count -lt $CxPageSize) {
+            break
+        }
+
+        $offset += $CxPageSize
+    }
+
+    if ($cxProjectNameSet -and $cxProjectNameSet.Count -gt 0) {
+        Write-Host "Loaded $($cxProjectNameSet.Count) Checkmarx One project names."
+    } else {
+        Write-Warning "No Checkmarx One projects were loaded. Check your CxBaseUrl / token / permissions."
+    }
+}
+
+
+# ==========================================
+# 4. PROCESS GITLAB PROJECTS
+# ==========================================
 
 $result = @()
 
 foreach ($proj in $projects) {
-    $projectId     = $proj.id
-    $projectName   = $proj.path_with_namespace
-    $defaultBranch = $proj.default_branch
+    $projectId       = $proj.id
+    $projectName     = $proj.path_with_namespace   # full path, e.g. group/subgroup/repo
+    $defaultBranch   = $proj.default_branch
+    $repoShortName   = $proj.path                  # repo slug, often what matches Cx project name
+    $repoDisplayName = $proj.name                  # human-friendly name
 
-    # Derive project status from GitLab fields
-    # archived (bool), marked_for_deletion_on (date or null)
+    # Derive project status from GitLab fields:
     $isArchived          = $false
     $markedForDeletionOn = $null
     $projectStatus       = "active"
@@ -94,7 +187,6 @@ foreach ($proj in $projects) {
         $isArchived = [bool]$proj.archived
     }
 
-    # This property may not exist on some instances, so guard for that
     if ($proj.PSObject.Properties.Name -contains "marked_for_deletion_on") {
         $markedForDeletionOn = $proj.marked_for_deletion_on
     }
@@ -111,20 +203,19 @@ foreach ($proj in $projects) {
 
     # Skip projects that have no repository (no default branch)
     if (-not $defaultBranch) {
-        Write-Warning "Project '$projectName' has no repository (no default branch) - skipping."
+        Write-Warning "GitLab project '$projectName' has no repository (no default branch) - skipping."
         continue
     }
 
-    Write-Host "Processing project: $projectName (default branch: $defaultBranch, status: $projectStatus)"
+    Write-Host "Processing GitLab project: $projectName (default branch: $defaultBranch, status: $projectStatus)"
 
     $lastChangeDate   = $null
     $lastChangeAuthor = $null
 
-    # 1) Try last merged MR into the default branch
+    # 4.1 – Try last merged MR into the default branch
     try {
-        # GET /projects/:id/merge_requests
         $mrUrl = "$GitLabBaseUrl/projects/$projectId/merge_requests?state=merged&target_branch=$([System.Uri]::EscapeDataString($defaultBranch))&order_by=updated_at&sort=desc&per_page=1"
-        $mrs = Invoke-RestMethod -Uri $mrUrl -Headers $Headers -Method Get
+        $mrs = Invoke-RestMethod -Uri $mrUrl -Headers $GitLabHeaders -Method Get
 
         if ($mrs -and $mrs.Count -gt 0) {
             $lastMr = $mrs[0]
@@ -135,7 +226,6 @@ foreach ($proj in $projects) {
             }
 
             # Who did the "last change" via MR:
-            # Prefer the person who merged it, then fall back to MR author
             if ($lastMr.merged_by -and $lastMr.merged_by.name) {
                 $lastChangeAuthor = $lastMr.merged_by.name
             } elseif ($lastMr.author -and $lastMr.author.name) {
@@ -143,57 +233,69 @@ foreach ($proj in $projects) {
             }
         }
     } catch {
-        Write-Warning "Failed to get merge requests for project '$projectName': $($_.Exception.Message)"
+        Write-Warning "Failed to get merge requests for GitLab project '$projectName': $($_.Exception.Message)"
     }
 
-    # 2) If no merged MR, fall back to latest commit on default branch
+    # 4.2 – If no merged MR, fall back to latest commit on default branch
     if (-not $lastChangeDate) {
         try {
-            # GET /projects/:id/repository/commits?ref_name=<branch>&per_page=1
             $commitsUrl = "$GitLabBaseUrl/projects/$projectId/repository/commits?ref_name=$([System.Uri]::EscapeDataString($defaultBranch))&per_page=1"
-            $commits = Invoke-RestMethod -Uri $commitsUrl -Headers $Headers -Method Get
+            $commits = Invoke-RestMethod -Uri $commitsUrl -Headers $GitLabHeaders -Method Get
 
             if ($commits -and $commits.Count -gt 0) {
                 $lastCommit = $commits[0]
-                # committed_date is usually what you want
                 $lastChangeDate = $lastCommit.committed_date
 
-                # Last change author comes from commit author
                 if ($lastCommit.author_name) {
                     $lastChangeAuthor = $lastCommit.author_name
                 } elseif ($lastCommit.committer_name) {
                     $lastChangeAuthor = $lastCommit.committer_name
                 }
             } else {
-                Write-Warning "No commits found on branch '$defaultBranch' for project '$projectName'."
+                Write-Warning "No commits found on branch '$defaultBranch' for GitLab project '$projectName'."
             }
         } catch {
-            Write-Warning "Failed to get commits for project '$projectName': $($_.Exception.Message)"
+            Write-Warning "Failed to get commits for GitLab project '$projectName': $($_.Exception.Message)"
         }
     }
 
-    # Convert lastChangeDate to date-only string (yyyy-MM-dd)
+    # 4.3 – Convert lastChangeDate to date-only (yyyy-MM-dd)
     $lastChangeDateOnly = $null
     if ($lastChangeDate) {
         try {
             $lastChangeDateOnly = ([datetime]$lastChangeDate).ToString("yyyy-MM-dd")
         } catch {
-            # Fallback to raw value if parse fails
             $lastChangeDateOnly = $lastChangeDate
         }
     }
 
+    # 4.4 – Check if this repo is being scanned in Checkmarx One
+    $scanningInCx = $false
+    if ($cxProjectNameSet -and $cxProjectNameSet.Count -gt 0) {
+        # Check a few possible name variants against Cx project names
+        if ($cxProjectNameSet.Contains($repoShortName) -or
+            $cxProjectNameSet.Contains($repoDisplayName) -or
+            $cxProjectNameSet.Contains($projectName)) {
+            $scanningInCx = $true
+        }
+    }
+
     $result += [pscustomobject]@{
-        RepositoryName   = $projectName
-        DefaultBranch    = $defaultBranch
-        LastChangeDate   = $lastChangeDateOnly
-        ProjectStatus    = $projectStatus
-        LastChangeAuthor = $lastChangeAuthor
+        RepositoryName       = $projectName
+        DefaultBranch        = $defaultBranch
+        LastChangeDate       = $lastChangeDateOnly
+        ProjectStatus        = $projectStatus
+        LastChangeAuthor     = $lastChangeAuthor
+        ScanningInCheckmarx  = $scanningInCx
     }
 }
 
+# ==========================================
+# 5. SORT AND EXPORT
+# ==========================================
+
 # Sort by LastChangeDate (newest first).
-# Repos with no LastChangeDate (null/empty) go to the bottom.
+# Repos with no LastChangeDate go to the bottom.
 $sortedResult = $result | Sort-Object {
     if ($_.LastChangeDate) {
         [datetime]$_.LastChangeDate
