@@ -1,26 +1,2 @@
-Install-Module Microsoft.Graph -Scope CurrentUser
-# Sign in interactively with delegated permission to send mail
-Connect-MgGraph -Scopes "Mail.Send"
-
-# Optional: confirm which account is in use
-Get-MgContext | Select-Object -Property Account, Scopes
-
-# Build message
-$to = "john.doe@company.com"   # send to yourself
-$params = @{
-  Message = @{
-    Subject = "Graph SMTP-AUTH-disabled test"
-    Body = @{
-      ContentType = "Text"
-      Content     = "If you got this, Graph sendMail works. Sent at $(Get-Date -Format o)."
-    }
-    ToRecipients = @(
-      @{ EmailAddress = @{ Address = $to } }
-    )
-  }
-  SaveToSentItems = $true
-}
-
-# Send as the signed-in user ("me")
-Send-MgUserMail -UserId "me" -BodyParameter $params
-"Sent OK via Microsoft Graph."
+Connect-MgGraph : InteractiveBrowserCredential authentication failed: A window handle must be configured. See 
+https://aka.ms/msal-net-wam#parent-window-handles
