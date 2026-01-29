@@ -1,33 +1,7 @@
-# --- Microsoft 365 SMTP test (smtp.office365.com:587 + STARTTLS) ---
-
-$smtpServer = "smtp.office365.com"
-$port       = 587
-
-$from = "john.doe@company.com"
-$to   = "john.doe@company.com"
-$subject = "SMTP test from PowerShell"
-$body    = "If you received this, SMTP submission works. Sent at $(Get-Date)."
-
-# Prompt securely for creds
-$cred = Get-Credential -UserName $from -Message "Enter your Microsoft 365 credentials"
-
-# Build and send
-$msg = New-Object System.Net.Mail.MailMessage($from, $to, $subject, $body)
-$smtp = New-Object System.Net.Mail.SmtpClient($smtpServer, $port)
-$smtp.EnableSsl = $true                 # STARTTLS on port 587
-$smtp.DeliveryMethod = [System.Net.Mail.SmtpDeliveryMethod]::Network
-$smtp.UseDefaultCredentials = $false
-$smtp.Credentials = $cred.GetNetworkCredential()
-
-try {
-    $smtp.Send($msg)
-    "Sent OK."
-}
-catch {
-    "Send FAILED: $($_.Exception.Message)"
-    if ($_.Exception.InnerException) { "Inner: $($_.Exception.InnerException.Message)" }
-}
-finally {
-    $msg.Dispose()
-    $smtp.Dispose()
-}
+The SMTP server requires a secure connection or the client was not authenticated.
+ The server response was: 5.7.57 Client not authenticated to send mail. Error: 535 5.7.139 Authentication unsuccessful, SmtpClientAuthenticati
+on is disabled for the Tenant. Visit https://aka.ms/smtp_auth_disabled for more information. [BN9PR03CA0076.namprd03.prod.outlook.com 2026-01-
+29T16:07:00.246Z 08DE5EE282E7A82D]"
+Inner: The SMTP server requires a secure connection or the client was not authenticated. The server response was: 5.7.57 Client not authentica
+ted to send mail. Error: 535 5.7.139 Authentication unsuccessful, SmtpClientAuthentication is disabled for the Tenant. Visit https://aka.ms/sm
+tp_auth_disabled for more information. [BN9PR03CA0076.namprd03.prod.outlook.com 2026-01-29T16:07:00.246Z 08DE5EE282E7A82D]
