@@ -1,0 +1,149 @@
+Clear-Host
+
+$jiraBaseUrl = "https://zayogroup.atlassian.net"
+$email = ""
+$apiToken = ""
+$cx_apiKey = ""
+$cx_project_id = "3890bdd4-7c52-4dcd-aa71-4fc98f7ed38e"
+$cx_domain = "https://us.ast.checkmarx.net"
+$cx_access_token_url = "https://us.iam.checkmarx.net/auth/realms/zayo/protocol/openid-connect/token"
+
+$jql = 'project = "Product Solution Design" and labels IN (SCA) and description ~ "zayo-group/tranzact/msvc-auth" and priority = High and status != Done and status != Canceled'
+
+$fields = @("summary", "status", "assignee", "created", "priority")
+
+$maxResults = 500
+
+$pair = "$email`:$apiToken"
+$encodedCreds = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+
+$headers = @{
+    Authorization  = "Basic $encodedCreds"
+    Accept         = "application/json"
+    "Content-Type" = "application/json"
+}
+
+$base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${jira_username}:${jira_token}"))
+
+$cx_body = @{
+    grant_type    = "refresh_token"
+    client_id     = "ast-app"
+    refresh_token = $cx_apiKey
+}
+
+try{
+$GetCXAccessToken = Invoke-RestMethod -Uri $cx_access_token_url -Method Post -Body $cx_body -ContentType "application/x-www-form-urlencoded"
+$cx_header = @{ Authorization = "Bearer " + $GetCXAccessToken.access_token }
+}catch {
+    Write-Host "An error has occured with GetCXAccessToken: $($_.Exception.Message)"
+    exit 1
+}
+
+function Invoke-JiraEnhancedJqlSearch {
+    param(
+        [string]$BaseUrl,
+        [hashtable]$Headers,
+        [string]$Jql,
+        [string[]]$Fields,
+        [int]$MaxResults,
+        [string]$NextPageToken
+    )
+
+    $url = "$BaseUrl/rest/api/3/search/jql"
+
+    $payload = @{
+        jql        = $Jql
+        maxResults = $MaxResults
+        fields     = $Fields
+    }
+
+    if ($NextPageToken) {
+        $payload.nextPageToken = $NextPageToken
+    }
+
+    $body = $payload | ConvertTo-Json -Depth 10
+
+    Invoke-RestMethod -Method Post -Uri $url -Headers $Headers -Body $body
+}
+
+$allIssues = @()
+$nextPageToken = $null
+
+do {
+    Write-Host "Fetching page (nextPageToken=$nextPageToken) ..."
+
+    $resp = Invoke-JiraEnhancedJqlSearch `
+        -BaseUrl $jiraBaseUrl `
+        -Headers $headers `
+        -Jql $jql `
+        -Fields $fields `
+        -MaxResults $maxResults `
+        -NextPageToken $nextPageToken
+
+    $allIssues += $resp.issues
+    $nextPageToken = $resp.nextPageToken
+
+} while (-not $resp.isLast)
+
+$results = $allIssues | ForEach-Object {
+    [PSCustomObject]@{
+        Key      = $_.key
+        Summary  = $_.fields.summary
+        Status   = $_.fields.status.name
+        Assignee = $_.fields.assignee.displayName
+        Priority = $_.fields.priority.name
+        Created  = $_.fields.created
+    }
+}
+
+$results | Format-Table -AutoSize
+Write-Host "Done. Retrieved $($results.Count) issues."
+
+foreach ($issue in $results) {
+
+    $key = $issue.key
+    $summary = $issue.summary
+    $webUrl = "$jiraBaseUrl/browse/$($key)"
+
+    if ($summary -match "(CVE-\d{4}-\d+)") {
+        $cve = $Matches[1]
+        Write-Host $cve
+    }
+
+    if ($summary -match "@\s*([^-]+)-") {
+        $packageSource = $Matches[1]
+        Write-Host $packageSource
+    }
+
+    if ($summary -match "@\s*[^-]+-([^-]+(?:-[^-]+)*)-\d") {
+        $packageName = $Matches[1]
+        Write-Host $packageName
+    }
+
+    if ($summary -match "(\d+\.\d+\.\d+)$") {
+        $version = $Matches[1]
+        Write-Host $version
+    }
+
+    Write-Host "Processing $key : $summary"
+
+    $cx_change_state_body = @{
+        packageName     = $packageName
+        packageVersion  = $version
+        packageManager  = $packageSource
+        vulnerabilityId = $cve
+        projectIds      = @($cx_project_id)
+        actions         = @(@{
+                actionType = "ChangeState"
+                value      = 595
+                comment    = "Jira bug URL: $webUrl"
+            })
+    } | ConvertTo-Json -Depth 10 -Compress
+
+    try {
+        $AddCheckmarxNote = Invoke-RestMethod -Uri "$cx_domain/api/sca/management-of-risk/package-vulnerabilities" -Method Post -Body $cx_change_state_body -Headers $cx_header -ContentType "application/json"
+    }
+    catch {
+        Write-Warning "An error has occured with AddCheckmarxNote: $($_.Exception.Message)"
+    }
+}
