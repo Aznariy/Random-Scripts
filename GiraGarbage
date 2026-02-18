@@ -1,14 +1,14 @@
 Clear-Host
 
-$jiraBaseUrl = "https://zayogroup.atlassian.net"
+$jiraBaseUrl = "https://microsoft.atlassian.net"
 $email = ""
 $apiToken = ""
 $cx_apiKey = ""
 $cx_project_id = "3890bdd4-7c52-4dcd-aa71-4fc98f7ed38e"
 $cx_domain = "https://us.ast.checkmarx.net"
-$cx_access_token_url = "https://us.iam.checkmarx.net/auth/realms/zayo/protocol/openid-connect/token"
+$cx_access_token_url = "https://us.iam.checkmarx.net/auth/realms/microsoft/protocol/openid-connect/token"
 
-$jql = 'project = "Product Solution Design" and labels IN (SCA) and description ~ "zayo-group/tranzact/msvc-auth" and priority = High and status != Done and status != Canceled'
+$jql = 'project = "Product Solution Design" and labels IN (SCA) and description ~ "microsoft/tranzact/msvc-auth" and priority = High and status != Done and status != Canceled'
 
 $fields = @("summary", "status", "assignee", "created", "priority")
 
