@@ -1,23 +1,25 @@
 cls
 
-$JiraInstance = @('Microsoft', 'Apple')
+$JiraInstance = @("Microsoft", "Google")
 $AllIssues = @()
 $JiraBaseUrl = [string]::Empty
 $JqlQuery = [string]::Empty
+$startMonth = "2026-02-01"
+$endMonth = "2026-02-28"
 
 $JiraApiToken = ""
-$JiraEmail = "bill.gates@microsoft.com"
+$JiraEmail = ""
 
 foreach ($Instance in $JiraInstance) {
 
     switch ($Instance) {
-        'Microsoft' {
-            $JiraBaseUrl = 'https://microsoft.atlassian.net/'
-            $JqlQuery = 'labels in (Security) and (type = Security or type = Bug) and createdDate >= "2026-02-01" and createdDate <= "2026-02-28" and priority = Highest'
+        "Microsoft" {
+            $JiraBaseUrl = "https://microsoft.atlassian.net/"
+            $JqlQuery = "labels in (Security) and (type = Security or type = Bug) and createdDate >= $($startMonth) and createdDate <= $($endMonth) and priority = High and status = Done"
         }
-        'Apple' {
-            $JiraBaseUrl = 'https://apple.atlassian.net/'
-            $JqlQuery = 'labels in (Security) and type = Bug and createdDate >= "2026-02-01" and createdDate <= "2026-02-28" and priority = Highest'
+        "Google" {
+            $JiraBaseUrl = "https://google-jira.atlassian.net/"
+            $JqlQuery = "labels in (Security) and type = Bug and createdDate >= $($startMonth) and createdDate <= $($endMonth) and (priority = High or priority = 'High (migrated)') and status = Done"
         }
     }
 
@@ -30,20 +32,35 @@ foreach ($Instance in $JiraInstance) {
 
     do {
         if ($nextPageToken) {   
-            $ApiUrl = "$JiraBaseUrl/rest/api/3/search/jql?jql=$([uri]::EscapeDataString($JqlQuery))&maxResults=100&fields=priority,created,summary&nextPageToken=$nextPageToken"
+            $ApiUrl = "$JiraBaseUrl/rest/api/3/search/jql?jql=$([uri]::EscapeDataString($JqlQuery))&maxResults=100&fields=priority,created,status,resolutiondate&nextPageToken=$nextPageToken"
         }
         else {
-            $ApiUrl = "$JiraBaseUrl/rest/api/3/search/jql?jql=$([uri]::EscapeDataString($JqlQuery))&maxResults=100&fields=priority,created,summary"
+            $ApiUrl = "$JiraBaseUrl/rest/api/3/search/jql?jql=$([uri]::EscapeDataString($JqlQuery))&maxResults=100&fields=priority,created,status,resolutiondate"
         }
         $Response = Invoke-RestMethod -Uri $ApiUrl -Headers $Headers -Method Get
-        $AppIssues += $Response.issues
+        $AppIssues = $Response.issues
         $nextPageToken = $Response.nextPageToken
-        Write-Output "$App Fetched $($AppIssues.Count) issues"
-        $AllIssues += [PSCustomObject]@{
-            Status       = $Issue.fields.status.name
-            CreatedDate  = $FormattedCreatedDate
-            ResolvedDate = $Issue.fields.status.ResolvedDate
-        }
+        Write-Output "$Instance Fetched $($AppIssues.Count) issues"
+        foreach ($Issue in $AppIssues) {
+                $AllIssues += [PSCustomObject]@{
+                    Status       = $Issue.fields.status.name
+                    CreatedDate  = ([datetime]$Issue.fields.created).ToString("yyyy-MM-dd")
+                    ResolvedDate = ([datetime]$Issue.fields.resolutiondate).ToString("yyyy-MM-dd")
+                }
+            }
+
     } while ($null -ne $nextPageToken)
 }
 
+$results = $AllIssues | ForEach-Object {
+
+    $days = ([datetime]$_.ResolvedDate - [datetime]$_.CreatedDate).Days
+
+    [PSCustomObject]@{
+        DaysToRemediate = $days
+    }
+}
+
+$average = ($results | Measure-Object -Property DaysToRemediate -Average).Average
+
+Write-Host "Average time to remediate: $average days"
